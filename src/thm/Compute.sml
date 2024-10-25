@@ -98,30 +98,38 @@ in
 end (* local *)
 
 fun env_lookup n xs =
-  case xs of
-    [] => raise ERR "compute.env_lookup" "Impossible: out of bounds access"
-  | x::xs => if n < 1 then x else env_lookup (n - 1) xs;
+  Array.sub (xs, n)
+  handle Subscript =>
+  raise ERR "compute.env_lookup" "Impossible: out of bounds access"
 
 fun get_code f funs =
   Vector.sub (funs, f)
   handle Subscript =>
   raise ERR "compute.get_code" "Impossible: out of bounds access";
 
-fun exec funs env ce =
+fun set_arg args i v =
+  Array.update (args, i, v)
+  handle Subscript =>
+  raise ERR "compute.set_arg" "Impossible: out of bounds access";
+
+fun exec funs env i ce =
   case ce of
     Const n => Num n
   | Var n => env_lookup n env
-  | Monop (m, x) => m (exec funs env x)
-  | Binop (b, x, y) => b (exec funs env x) (exec funs env y)
-  | App (f, xs) => exec funs (exec_list funs env xs [])
-                             (get_code f funs)
-  | Let (x, y) => exec funs (exec funs env x::env) y
+  | Monop (m, x) => m (exec funs env i x)
+  | Binop (b, x, y) => b (exec funs env i x) (exec funs env i y)
+  | App (f, xs) => let
+    val (sz, code) = get_code f funs
+    val args = Array.array (sz, cv_zero)
+    val j = exec_list funs env i args xs 0
+    in exec funs args j code end
+  | Let (x, y) => (set_arg env i (exec funs env i x); exec funs env (i+1) y)
   | If (x, y, z) =>
-      exec funs env (if exec funs env x = cv_zero then z else y)
-and exec_list funs env xs acc =
+      exec funs env i (if exec funs env i x = cv_zero then z else y)
+and exec_list funs env i args xs j =
   case xs of
-    [] => List.rev acc
-  | x::xs => exec_list funs env xs (exec funs env x::acc);
+    [] => j
+  | x::xs => (set_arg args j (exec funs env i x); exec_list funs env i args xs (j+1));
 
 local
   open Arbnum
@@ -264,40 +272,37 @@ local
     end
   fun mk_monop mop x = Monop (monop mop, x);
   fun mk_binop bop x y = Binop (binop bop, x, y);
+  fun get nm (lv, bvs) = lv - index (fn x => x = nm) bvs - 1
 in
-  fun dest_cexp ct bvs fns tm =
-    case partial (ERR "dest_cexp" "term is not a compute value")
-         (term_to_token ct) tm of
-      NUM n => Const n
-    | VAR nm => Var (index (fn x => x = nm) bvs)
-    | LET (s,x,y) => Let (dest_cexp ct bvs fns x, dest_cexp ct (s::bvs) fns y)
-    | IF (x,y,z) => If (dest_cexp ct bvs fns x,
-                        dest_cexp ct bvs fns y,
-                        dest_cexp ct bvs fns z)
-    | FST x => mk_monop Fst (dest_cexp ct bvs fns x)
-    | SND x => mk_monop Snd (dest_cexp ct bvs fns x)
-    | ISPAIR x => mk_monop IsPair (dest_cexp ct bvs fns x)
-    | PAIR (x,y) => mk_binop MkPair (dest_cexp ct bvs fns x)
-                                    (dest_cexp ct bvs fns y)
-    | ADD (x,y) => mk_binop Add (dest_cexp ct bvs fns x)
-                                (dest_cexp ct bvs fns y)
-    | SUB (x,y) => mk_binop Sub (dest_cexp ct bvs fns x)
-                                (dest_cexp ct bvs fns y)
-    | MUL (x,y) => mk_binop Mul (dest_cexp ct bvs fns x)
-                                (dest_cexp ct bvs fns y)
-    | DIV (x,y) => mk_binop Divide (dest_cexp ct bvs fns x)
-                                   (dest_cexp ct bvs fns y)
-    | MOD (x,y) => mk_binop Mod (dest_cexp ct bvs fns x)
-                                (dest_cexp ct bvs fns y)
-    | LE (x,y) => mk_binop Less (dest_cexp ct bvs fns x)
-                                (dest_cexp ct bvs fns y)
-    | EQ (x,y) => mk_binop Eq (dest_cexp ct bvs fns x)
-                              (dest_cexp ct bvs fns y)
-    | APP (f,xs) =>
+  fun dest_cexp ct bvs fns tm = let
+    val lv = length bvs
+    val sz = ref lv
+    fun push s (lv, bvs) = (if !sz < lv then sz := lv else (); (lv + 1, s::bvs))
+    fun go bvs tm =
+      case partial (ERR "dest_cexp" "term is not a compute value")
+          (term_to_token ct) tm of
+        NUM n => Const n
+      | VAR nm => Var (get nm bvs)
+      | LET (s,x,y) => Let (go bvs x, go (push s bvs) y)
+      | IF (x,y,z) => If (go bvs x, go bvs y, go bvs z)
+      | FST x => mk_monop Fst (go bvs x)
+      | SND x => mk_monop Snd (go bvs x)
+      | ISPAIR x => mk_monop IsPair (go bvs x)
+      | PAIR (x,y) => mk_binop MkPair (go bvs x) (go bvs y)
+      | ADD (x,y) => mk_binop Add (go bvs x) (go bvs y)
+      | SUB (x,y) => mk_binop Sub (go bvs x) (go bvs y)
+      | MUL (x,y) => mk_binop Mul (go bvs x) (go bvs y)
+      | DIV (x,y) => mk_binop Divide (go bvs x) (go bvs y)
+      | MOD (x,y) => mk_binop Mod (go bvs x) (go bvs y)
+      | LE (x,y) => mk_binop Less (go bvs x) (go bvs y)
+      | EQ (x,y) => mk_binop Eq (go bvs x) (go bvs y)
+      | APP (f,xs) =>
         case Vector.findi (same_const f o fst o snd) fns of
-          SOME (i, _) => App (i, List.map (dest_cexp ct bvs fns) xs)
+          SOME (i, _) => App (i, List.map (go bvs) xs)
         | _ => raise ERR "dest_cexp"
-                         ("could not find equation for: " ^ fst (dest_const f))
+                        ("could not find equation for: " ^ fst (dest_const f))
+    val code = go (lv, bvs) tm
+    in (!sz, code) end
 end (* local *)
 
 (* -------------------------------------------------------------------------
@@ -627,8 +632,8 @@ fun term_compute {cval_terms, cval_type, num_type, char_eqns } =
       in
         fn tm =>
           let
-            val cexp = dest_cexp ct [] eqs tm
-            val cval = exec code [] cexp
+            val (sz, cexp) = dest_cexp ct [] eqs tm
+            val cval = exec code (Array.array (sz, cv_zero)) 0 cexp
           in
             cv_to_term cval
           end
