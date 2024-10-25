@@ -277,7 +277,7 @@ in
   fun dest_cexp ct bvs fns tm = let
     val lv = length bvs
     val sz = ref lv
-    fun push s (lv, bvs) = (if !sz < lv then sz := lv else (); (lv + 1, s::bvs))
+    fun push s (lv, bvs) = (if !sz <= lv then sz := lv + 1 else (); (lv + 1, s::bvs))
     fun go bvs tm =
       case partial (ERR "dest_cexp" "term is not a compute value")
           (term_to_token ct) tm of
@@ -301,7 +301,7 @@ in
           SOME (i, _) => App (i, List.map (go bvs) xs)
         | _ => raise ERR "dest_cexp"
                         ("could not find equation for: " ^ fst (dest_const f))
-    val code = go (lv, bvs) tm
+    val code = go (lv, rev bvs) tm
     in (!sz, code) end
 end (* local *)
 
